@@ -21,13 +21,41 @@ _service = None
 def _get_service():
     global _service
     if _service is None:
-        sa_json = os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"]
-        sa_info = json.loads(sa_json)
+        sa_info = _load_service_account_info()
         creds = service_account.Credentials.from_service_account_info(
             sa_info, scopes=SCOPES
         )
         _service = build("drive", "v3", credentials=creds)
     return _service
+
+
+def _load_service_account_info() -> dict:
+    """Carrega o JSON da Service Account de forma robusta.
+
+    Lida com os casos comuns que quebram no Railway/Docker:
+    - JSON em linha única normal
+    - JSON com a private_key contendo '\\n' literais (escapados)
+    - JSON envolto em aspas simples ou duplas extras
+    """
+    raw = os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"].strip()
+
+    # Remove aspas externas acidentais
+    if (raw.startswith("'") and raw.endswith("'")) or (
+        raw.startswith('"') and raw.endswith('"')
+    ):
+        raw = raw[1:-1]
+
+    try:
+        info = json.loads(raw)
+    except json.JSONDecodeError:
+        # Algumas plataformas escapam as barras: tenta desfazer
+        info = json.loads(raw.replace("\\n", "\n").replace('\\"', '"'))
+
+    # Garante que a private_key tenha quebras de linha reais
+    if "private_key" in info and "\\n" in info["private_key"]:
+        info["private_key"] = info["private_key"].replace("\\n", "\n")
+
+    return info
 
 
 def _find_or_create_folder(name: str, parent_id: str) -> str:
