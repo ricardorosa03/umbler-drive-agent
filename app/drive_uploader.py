@@ -4,6 +4,7 @@ Gerencia pastas por cliente e faz upload de arquivos no Google Drive
 via Service Account. Compatível com Meu Drive E Drives Compartilhados.
 """
 
+import base64
 import io
 import json
 import os
@@ -32,10 +33,10 @@ def _get_service():
 def _load_service_account_info() -> dict:
     """Carrega o JSON da Service Account de forma robusta.
 
-    Lida com os casos comuns que quebram no Railway/Docker:
-    - JSON em linha única normal
-    - JSON com a private_key contendo '\\n' literais (escapados)
-    - JSON envolto em aspas simples ou duplas extras
+    Aceita dois formatos na variável GOOGLE_SERVICE_ACCOUNT_JSON:
+    1. JSON puro (linha única ou com quebras)
+    2. JSON codificado em Base64 (recomendado — evita problemas de
+       truncamento, aspas e quebras de linha no Railway)
     """
     raw = os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"].strip()
 
@@ -45,13 +46,27 @@ def _load_service_account_info() -> dict:
     ):
         raw = raw[1:-1]
 
+    # Se NÃO for um JSON cru (não começa com '{'), trata como Base64.
+    if not raw.lstrip().startswith("{"):
+        # Remove qualquer whitespace que o painel possa ter injetado
+        # (espaços, quebras de linha, tabs) — Base64 válido não os tem.
+        cleaned = "".join(raw.split())
+        # Corrige padding se necessário
+        missing_padding = len(cleaned) % 4
+        if missing_padding:
+            cleaned += "=" * (4 - missing_padding)
+        decoded = base64.b64decode(cleaned).decode("utf-8")
+        info = json.loads(decoded)
+        if "private_key" in info and "\\n" in info["private_key"]:
+            info["private_key"] = info["private_key"].replace("\\n", "\n")
+        return info
+
+    # Caso seja JSON cru
     try:
         info = json.loads(raw)
     except json.JSONDecodeError:
-        # Algumas plataformas escapam as barras: tenta desfazer
         info = json.loads(raw.replace("\\n", "\n").replace('\\"', '"'))
 
-    # Garante que a private_key tenha quebras de linha reais
     if "private_key" in info and "\\n" in info["private_key"]:
         info["private_key"] = info["private_key"].replace("\\n", "\n")
 
