@@ -1,0 +1,13 @@
+.env
+*.json
+service-account*.json
+umbler-drive-pfa*.json
+__pycache__/
+*.pyc
+.venv/
+venv/
+logs/
+*.log
+.DS_Store
+.git/
+README.md
