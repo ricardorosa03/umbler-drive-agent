@@ -70,7 +70,14 @@ async def webhook_umbler(request: Request, background_tasks: BackgroundTasks):
     if not file_info:
         return JSONResponse({"ignored": True, "reason": "no file"})
 
-    # 3. Extrai campos relevantes
+    # 3. Filtra: processa APENAS arquivos enviados pelo CLIENTE.
+    # O Umbler marca a origem em Message.Source: "Contact" = cliente,
+    # outros valores (Member/Operator) = equipe do escritório.
+    source = message.get("Source", "")
+    if source != "Contact":
+        return JSONResponse({"ignored": True, "reason": f"source not client: {source}"})
+
+    # 4. Extrai campos relevantes
     file_url = file_info.get("Url", "")
     content_type = file_info.get("ContentType", "application/octet-stream")
     original_name = file_info.get("OriginalName", "documento")
