@@ -184,9 +184,7 @@ async def process_file(
 
         log.info(f"[{event_id}] ✅ Salvo no Drive: {drive_link}")
 
-        # 5. Confirma para o cliente via WhatsApp
-        if chat_id:
-            await send_confirmation(chat_id, nome_final, drive_link)
+        # 5. (Confirmação via WhatsApp desativada — arquivamento silencioso)
 
         # 6. Log estruturado final
         log.info(
