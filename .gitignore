@@ -1,0 +1,29 @@
+# Ambiente / credenciais — NUNCA versionar
+.env
+*.json
+!*.example.json
+service-account*.json
+umbler-drive-pfa*.json
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+.venv/
+
+# Logs
+logs/
+*.log
+
+# Sistema
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
