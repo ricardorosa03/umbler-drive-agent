@@ -46,6 +46,32 @@ def health():
     return {"status": "ok", "service": "PFA Umbler Drive Agent"}
 
 
+@app.get("/debug/sa")
+def debug_sa():
+    """Diagnóstico SEGURO da variável do service account.
+    Não expõe a chave — só metadados que ajudam a achar o problema."""
+    raw = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON", "")
+    info = {
+        "comprimento": len(raw),
+        "primeiros_5_chars": raw[:5],
+        "ultimos_5_chars": raw[-5:] if len(raw) >= 5 else raw,
+        "comeca_com_chave": raw.lstrip().startswith("{"),
+        "tem_aspas_externas": (raw.startswith('"') or raw.startswith("'")),
+    }
+    # Tenta decodificar e reporta se achou os campos
+    try:
+        from app.drive_uploader import _load_service_account_info
+        parsed = _load_service_account_info()
+        info["parse_ok"] = True
+        info["tem_client_email"] = "client_email" in parsed
+        info["tem_token_uri"] = "token_uri" in parsed
+        info["tem_private_key"] = "private_key" in parsed
+    except Exception as e:
+        info["parse_ok"] = False
+        info["erro"] = str(e)[:200]
+    return info
+
+
 # ─── Webhook principal ────────────────────────────────────────────────────────
 @app.post("/webhook/umbler")
 async def webhook_umbler(request: Request, background_tasks: BackgroundTasks):
