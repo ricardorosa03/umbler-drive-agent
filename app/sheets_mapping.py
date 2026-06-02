@@ -13,7 +13,10 @@ import datetime
 from googleapiclient.discovery import build
 from app.drive_uploader import _get_credentials  # reaproveita as credenciais
 
-SHEET_ID = os.environ["GOOGLE_SHEETS_MAP_ID"]
+SHEET_ID = os.environ.get("GOOGLE_SHEETS_MAP_ID", "").strip().strip('"').strip("'")
+# Fallback: se a env var não chegar (problema de parsing no painel), usa o ID fixo
+if not SHEET_ID:
+    SHEET_ID = "1wfgQIfOda6XmntL9ppkTKPMaGi_4t327WZJ6e0eCpW8"
 RANGE_LEITURA = "A2:E"  # ignora o cabeçalho
 _sheets = None
 

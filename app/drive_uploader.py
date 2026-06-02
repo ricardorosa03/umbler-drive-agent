@@ -33,7 +33,9 @@ SCOPES = [
 ]
 
 # ID do SHARED DRIVE "Núcleo Imobiliário" (começa com 0A...)
-ROOT_DRIVE_ID = os.environ["GOOGLE_DRIVE_ROOT_FOLDER_ID"]
+ROOT_DRIVE_ID = os.environ.get("GOOGLE_DRIVE_ROOT_FOLDER_ID", "").strip().strip('"').strip("'").lstrip("\\").strip('"')
+if not ROOT_DRIVE_ID:
+    ROOT_DRIVE_ID = "0ACQVPouU4waiUk9PVA"
 
 WHATSAPP_SUBFOLDER = "Documentos WhatsApp"
 REVIEW_FOLDER = "_A Revisar WhatsApp"
