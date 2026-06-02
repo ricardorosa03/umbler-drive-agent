@@ -42,8 +42,39 @@ def _pdf_to_image_base64(pdf_bytes: bytes) -> str:
     return base64.standard_b64encode(png_bytes).decode("utf-8")
 
 
-def _image_to_base64(image_bytes: bytes) -> str:
-    return base64.standard_b64encode(image_bytes).decode("utf-8")
+def _image_to_base64(image_bytes: bytes, media_type: str = "image/jpeg") -> tuple:
+    """Converte imagem para base64, redimensionando se passar de ~7MB.
+    Retorna (base64, media_type) — o media_type pode mudar para image/jpeg
+    se a imagem precisar ser recomprimida."""
+    LIMITE = 7 * 1024 * 1024  # 7 MB
+    if len(image_bytes) <= LIMITE:
+        return base64.standard_b64encode(image_bytes).decode("utf-8"), media_type
+
+    # Imagem grande: reduz usando Pillow (resultado sempre JPEG)
+    try:
+        from PIL import Image
+        import io as _io
+
+        img = Image.open(_io.BytesIO(image_bytes))
+        if img.mode in ("RGBA", "P"):
+            img = img.convert("RGB")
+        qualidade = 85
+        largura, altura = img.size
+        while True:
+            buf = _io.BytesIO()
+            img.save(buf, format="JPEG", quality=qualidade, optimize=True)
+            dados = buf.getvalue()
+            if len(dados) <= LIMITE or (qualidade <= 40 and largura <= 1500):
+                return base64.standard_b64encode(dados).decode("utf-8"), "image/jpeg"
+            if qualidade > 40:
+                qualidade -= 15
+            else:
+                largura = int(largura * 0.7)
+                altura = int(altura * 0.7)
+                img = img.resize((largura, altura), Image.LANCZOS)
+    except Exception as e:
+        print(f"[Vision] Falha ao redimensionar imagem: {e}")
+        return base64.standard_b64encode(image_bytes).decode("utf-8"), media_type
 
 
 def identify_document(
@@ -69,11 +100,9 @@ def identify_document(
         image_b64 = _pdf_to_image_base64(file_bytes)
         media_type = "image/png"
     elif content_type in ("image/jpeg", "image/jpg"):
-        image_b64 = _image_to_base64(file_bytes)
-        media_type = "image/jpeg"
+        image_b64, media_type = _image_to_base64(file_bytes, "image/jpeg")
     elif content_type == "image/png":
-        image_b64 = _image_to_base64(file_bytes)
-        media_type = "image/png"
+        image_b64, media_type = _image_to_base64(file_bytes, "image/png")
     else:
         # Tipo não suportado para visão: usa nome original
         return {

@@ -37,6 +37,15 @@ ROOT_DRIVE_ID = os.environ.get("GOOGLE_DRIVE_ROOT_FOLDER_ID", "").strip().strip(
 if not ROOT_DRIVE_ID:
     ROOT_DRIVE_ID = "0ACQVPouU4waiUk9PVA"
 
+# Trava de segurança: IDs de Shared Drive começam com "0A". Se a variável vier
+# com um ID de pasta comum antigo (ex: a pasta de teste "1r2A..."), ignora e usa
+# o Shared Drive correto. Evita o erro "Shared drive not found".
+if not ROOT_DRIVE_ID.startswith("0A"):
+    print(f"[drive] AVISO: ROOT_DRIVE_ID '{ROOT_DRIVE_ID}' não é Shared Drive; usando 0ACQVPouU4waiUk9PVA")
+    ROOT_DRIVE_ID = "0ACQVPouU4waiUk9PVA"
+
+print(f"[drive] ROOT_DRIVE_ID em uso: {ROOT_DRIVE_ID}")
+
 WHATSAPP_SUBFOLDER = "Documentos WhatsApp"
 REVIEW_FOLDER = "_A Revisar WhatsApp"
 
