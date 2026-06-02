@@ -1,11 +1,18 @@
 """
 main.py
-API intermediária: Umbler Talk → Claude Vision → Google Drive
+API intermediária: Umbler Talk -> Claude Vision -> Google Drive (Núcleo Imobiliário)
+
+Roteamento (apenas documentos enviados pelo CLIENTE, Source=Contact):
+  1. Telefone na planilha?  -> salva em {pasta}/Documentos WhatsApp/
+  2. Tem tag de outro núcleo (Bancário/PFI)? -> revisão "Outro núcleo"
+  3. Tem tag "Cliente"? -> revisão "Cliente sem vínculo" (+ log de candidata)
+  4. Lead/novo -> cria {Inicial}/{Nome} {número}, salva, registra na planilha
 """
 
 import os
 import json
 import logging
+import unicodedata
 from datetime import datetime
 
 import httpx
@@ -16,20 +23,29 @@ from fastapi.responses import JSONResponse
 load_dotenv()
 
 from app.document_identifier import identify_document
-from app.drive_uploader import get_client_folder_id, upload_file
-from app.umbler_client import send_confirmation
-
-# ─── Logging ────────────────────────────────────────────────────────────────
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
+from app.drive_uploader import (
+    create_lead_folder,
+    get_review_folder,
+    get_whatsapp_subfolder,
+    find_client_candidate,
+    upload_file,
 )
+from app.sheets_mapping import lookup_folder_by_phone, register_mapping
+
+# ─── Config ───────────────────────────────────────────────────────────────────
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger(__name__)
 
-# ─── App ─────────────────────────────────────────────────────────────────────
-app = FastAPI(title="PFA | Umbler → Drive Agent", version="1.0.0")
+app = FastAPI(title="PFA | Umbler -> Drive Agent", version="2.0.0")
 
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
+
+# Tag que marca quem já é cliente (ID é mais estável que o nome)
+CLIENTE_TAG_ID = "aBlPTBc94SJ_ybrX"
+CLIENTE_TAG_NOME = "cliente"
+# Tags de OUTROS núcleos (não-imobiliário) — comparadas normalizadas (sem acento)
+OUTRO_NUCLEO_TAGS = {"bancario", "pfi"}
+
 SUPPORTED_MIMES = {
     "application/pdf",
     "image/jpeg",
@@ -40,86 +56,60 @@ SUPPORTED_MIMES = {
 }
 
 
-# ─── Health check ─────────────────────────────────────────────────────────────
+def _norm(t: str) -> str:
+    t = unicodedata.normalize("NFKD", t or "").encode("ascii", "ignore").decode()
+    return t.lower().strip()
+
+
+def _so_digitos(t: str) -> str:
+    return "".join(c for c in (t or "") if c.isdigit())
+
+
+# ─── Health ───────────────────────────────────────────────────────────────────
 @app.get("/")
 def health():
-    return {"status": "ok", "service": "PFA Umbler Drive Agent"}
+    return {"status": "ok", "service": "PFA Umbler Drive Agent", "version": "2.0.0"}
 
 
-@app.get("/debug/sa")
-def debug_sa():
-    """Diagnóstico SEGURO da variável do service account.
-    Não expõe a chave — só metadados que ajudam a achar o problema."""
-    raw = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON", "")
-    info = {
-        "comprimento": len(raw),
-        "primeiros_5_chars": raw[:5],
-        "ultimos_5_chars": raw[-5:] if len(raw) >= 5 else raw,
-        "comeca_com_chave": raw.lstrip().startswith("{"),
-        "tem_aspas_externas": (raw.startswith('"') or raw.startswith("'")),
-    }
-    # Tenta decodificar e reporta se achou os campos
-    try:
-        from app.drive_uploader import _load_service_account_info
-        parsed = _load_service_account_info()
-        info["parse_ok"] = True
-        info["tem_client_email"] = "client_email" in parsed
-        info["tem_token_uri"] = "token_uri" in parsed
-        info["tem_private_key"] = "private_key" in parsed
-    except Exception as e:
-        info["parse_ok"] = False
-        info["erro"] = str(e)[:200]
-    return info
-
-
-# ─── Webhook principal ────────────────────────────────────────────────────────
+# ─── Webhook ──────────────────────────────────────────────────────────────────
 @app.post("/webhook/umbler")
 async def webhook_umbler(request: Request, background_tasks: BackgroundTasks):
-    # 1. Valida secret na query string
     secret = request.query_params.get("secret", "")
     if WEBHOOK_SECRET and secret != WEBHOOK_SECRET:
-        log.warning("Webhook recusado: secret inválido")
         raise HTTPException(status_code=401, detail="Unauthorized")
 
     body = await request.json()
-    event_type = body.get("Type", "")
+    if body.get("Type", "") != "MessageFileUploaded":
+        return JSONResponse({"ignored": True, "type": body.get("Type")})
 
-    # 2. Filtra apenas MessageFileUploaded
-    if event_type != "MessageFileUploaded":
-        return JSONResponse({"ignored": True, "type": event_type})
-
-    payload = body.get("Payload", {})
-    content = payload.get("Content", {})
+    content = body.get("Payload", {}).get("Content", {})
     message = content.get("Message", {})
     file_info = message.get("File")
-
     if not file_info:
         return JSONResponse({"ignored": True, "reason": "no file"})
 
-    # 3. Filtra: processa APENAS arquivos enviados pelo CLIENTE.
-    # O Umbler marca a origem em Message.Source: "Contact" = cliente,
-    # outros valores (Member/Operator) = equipe do escritório.
-    source = message.get("Source", "")
-    if source != "Contact":
-        return JSONResponse({"ignored": True, "reason": f"source not client: {source}"})
+    # Só processa o que o CLIENTE enviou
+    if message.get("Source", "") != "Contact":
+        return JSONResponse({"ignored": True, "reason": "not from client"})
 
-    # 4. Extrai campos relevantes
-    file_url = file_info.get("Url", "")
-    content_type = file_info.get("ContentType", "application/octet-stream")
-    original_name = file_info.get("OriginalName", "documento")
-    client_name = content.get("Contact", {}).get("Name", "Cliente Desconhecido")
-    phone = content.get("Contact", {}).get("PhoneNumber", "")
+    contact = content.get("Contact", {})
+    client_name = contact.get("Name", "Cliente Desconhecido")
+    phone = contact.get("PhoneNumber", "")
+    tags = contact.get("Tags", []) or []
     chat_id = content.get("Id", "")
     event_id = body.get("EventId", "")
 
-    log.info(f"[{event_id}] Arquivo recebido de '{client_name}' ({phone}): {original_name}")
+    file_url = file_info.get("Url", "")
+    content_type = file_info.get("ContentType", "application/octet-stream")
+    original_name = file_info.get("OriginalName", "documento")
 
-    # 4. Verifica tipo suportado
+    # LOG das tags — para confirmar que chegam no payload ao vivo
+    tag_repr = [{"Name": t.get("Name"), "Id": t.get("Id")} for t in tags]
+    log.info(f"[{event_id}] Arquivo de '{client_name}' ({phone}) | tags={tag_repr} | {original_name}")
+
     if content_type not in SUPPORTED_MIMES:
-        log.info(f"[{event_id}] Tipo não suportado: {content_type} — ignorando")
         return JSONResponse({"ignored": True, "reason": f"unsupported mime: {content_type}"})
 
-    # 5. Processa em background (retorna 200 imediatamente pro Umbler)
     background_tasks.add_task(
         process_file,
         event_id=event_id,
@@ -127,78 +117,75 @@ async def webhook_umbler(request: Request, background_tasks: BackgroundTasks):
         content_type=content_type,
         original_name=original_name,
         client_name=client_name,
-        chat_id=chat_id,
+        phone=phone,
+        tags=tags,
     )
-
     return JSONResponse({"received": True, "event_id": event_id})
 
 
-# ─── Processamento em background ──────────────────────────────────────────────
-async def process_file(
-    event_id: str,
-    file_url: str,
-    content_type: str,
-    original_name: str,
-    client_name: str,
-    chat_id: str,
-):
+# ─── Decisão de destino ───────────────────────────────────────────────────────
+def resolve_destination(client_name: str, phone: str, tags: list, event_id: str) -> str:
+    """Aplica a árvore de roteamento e retorna o folder_id de DESTINO do upload."""
+    phone_digits = _so_digitos(phone)
+
+    # 1. Já mapeado na planilha?
+    mapped = lookup_folder_by_phone(phone_digits)
+    if mapped:
+        log.info(f"[{event_id}] Telefone mapeado na planilha -> {mapped}")
+        return get_whatsapp_subfolder(mapped)
+
+    tag_names = {_norm(t.get("Name", "")) for t in tags}
+    tag_ids = {t.get("Id", "") for t in tags}
+
+    # 2. Outro núcleo (Bancário/PFI) -> revisão, não mexe no imobiliário
+    if tag_names & OUTRO_NUCLEO_TAGS:
+        log.info(f"[{event_id}] Tag de outro núcleo detectada -> revisão")
+        return get_review_folder("Outro núcleo", client_name, phone_digits)
+
+    # 3. Cliente imobiliário sem vínculo -> revisão (nunca cria pasta)
+    if CLIENTE_TAG_ID in tag_ids or CLIENTE_TAG_NOME in tag_names:
+        candidata = find_client_candidate(client_name)
+        log.info(f"[{event_id}] Cliente sem vínculo na planilha. Pasta candidata: {candidata}")
+        return get_review_folder("Cliente sem vínculo", client_name, phone_digits)
+
+    # 4. Lead/novo -> cria pasta e registra vínculo
+    log.info(f"[{event_id}] Lead/novo -> criando pasta")
+    main_folder = create_lead_folder(client_name, phone_digits)
+    register_mapping(phone_digits, client_name, main_folder, "auto-lead")
+    return get_whatsapp_subfolder(main_folder)
+
+
+# ─── Processamento ────────────────────────────────────────────────────────────
+async def process_file(event_id, file_url, content_type, original_name, client_name, phone, tags):
     try:
-        # 1. Baixa o arquivo
-        log.info(f"[{event_id}] Baixando arquivo: {file_url}")
         async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.get(file_url)
             if resp.status_code == 401:
-                # Tenta com Bearer token da Umbler
-                umbler_token = os.environ.get("UMBLER_API_TOKEN", "")
                 resp = await client.get(
-                    file_url, headers={"Authorization": umbler_token}
+                    file_url, headers={"Authorization": os.environ.get("UMBLER_API_TOKEN", "")}
                 )
             resp.raise_for_status()
             file_bytes = resp.content
-
         log.info(f"[{event_id}] Arquivo baixado: {len(file_bytes)} bytes")
 
-        # 2. Identifica o documento via Claude Vision
-        identification = identify_document(
-            file_bytes=file_bytes,
-            content_type=content_type,
-            original_name=original_name,
-            client_name=client_name,
-        )
+        identification = identify_document(file_bytes, content_type, original_name, client_name)
         nome_final = identification["nome_final"]
-        tipo = identification["tipo"]
-        confianca = identification["confianca"]
+        log.info(f"[{event_id}] Identificado: {identification['tipo']} -> {nome_final}")
 
-        log.info(f"[{event_id}] Identificado como: {tipo} (confiança: {confianca}) → {nome_final}")
+        destino_id = resolve_destination(client_name, phone, tags, event_id)
 
-        # 3. Obtém/cria pasta do cliente no Drive
-        folder_id = get_client_folder_id(client_name)
-
-        # 4. Faz upload
-        drive_link = upload_file(
-            file_bytes=file_bytes,
-            file_name=nome_final,
-            content_type=content_type,
-            folder_id=folder_id,
-        )
-
+        drive_link = upload_file(file_bytes, nome_final, content_type, destino_id)
         log.info(f"[{event_id}] ✅ Salvo no Drive: {drive_link}")
 
-        # 5. (Confirmação via WhatsApp desativada — arquivamento silencioso)
-
-        # 6. Log estruturado final
-        log.info(
-            json.dumps({
-                "event": "file_processed",
-                "event_id": event_id,
-                "client": client_name,
-                "tipo": tipo,
-                "confianca": confianca,
-                "nome_final": nome_final,
-                "drive_link": drive_link,
-                "timestamp": datetime.utcnow().isoformat(),
-            })
-        )
-
+        log.info(json.dumps({
+            "event": "file_processed",
+            "event_id": event_id,
+            "client": client_name,
+            "phone": _so_digitos(phone),
+            "tipo": identification["tipo"],
+            "nome_final": nome_final,
+            "drive_link": drive_link,
+            "timestamp": datetime.utcnow().isoformat(),
+        }))
     except Exception as e:
         log.error(f"[{event_id}] ❌ Erro ao processar arquivo: {e}", exc_info=True)
