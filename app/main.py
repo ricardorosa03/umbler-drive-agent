@@ -30,7 +30,7 @@ from app.drive_uploader import (
     find_client_candidate,
     upload_file,
 )
-from app.sheets_mapping import lookup_folder_by_phone, register_mapping
+from app.sheets_mapping import lookup_phone, register_row
 
 # ─── Config ───────────────────────────────────────────────────────────────────
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -69,6 +69,24 @@ def _so_digitos(t: str) -> str:
 @app.get("/")
 def health():
     return {"status": "ok", "service": "PFA Umbler Drive Agent", "version": "2.0.0"}
+
+
+@app.get("/debug/drives")
+def debug_drives():
+    """Lista os Shared Drives que a Service Account enxerga.
+    Ajuda a confirmar acesso e descobrir o ID correto."""
+    try:
+        from app.drive_uploader import _get_service, ROOT_DRIVE_ID
+        svc = _get_service()
+        result = svc.drives().list(pageSize=100, fields="drives(id, name)").execute()
+        drives = result.get("drives", [])
+        return {
+            "root_drive_id_configurado": ROOT_DRIVE_ID,
+            "shared_drives_visiveis": drives,
+            "total": len(drives),
+        }
+    except Exception as e:
+        return {"erro": str(e)[:300]}
 
 
 # ─── Webhook ──────────────────────────────────────────────────────────────────
@@ -128,30 +146,38 @@ def resolve_destination(client_name: str, phone: str, tags: list, event_id: str)
     """Aplica a árvore de roteamento e retorna o folder_id de DESTINO do upload."""
     phone_digits = _so_digitos(phone)
 
-    # 1. Já mapeado na planilha?
-    mapped = lookup_folder_by_phone(phone_digits)
-    if mapped:
-        log.info(f"[{event_id}] Telefone mapeado na planilha -> {mapped}")
-        return get_whatsapp_subfolder(mapped)
+    # 1. Consulta a planilha
+    info = lookup_phone(phone_digits)
+
+    if info["status"] == "confirmado":
+        log.info(f"[{event_id}] Telefone confirmado na planilha -> {info['pasta_id']}")
+        return get_whatsapp_subfolder(info["pasta_id"])
+
+    ja_pendente = info["status"] == "pendente"
 
     tag_names = {_norm(t.get("Name", "")) for t in tags}
     tag_ids = {t.get("Id", "") for t in tags}
 
-    # 2. Outro núcleo (Bancário/PFI) -> revisão, não mexe no imobiliário
+    # 2. Outro núcleo (Bancário/PFI) -> revisão
     if tag_names & OUTRO_NUCLEO_TAGS:
-        log.info(f"[{event_id}] Tag de outro núcleo detectada -> revisão")
+        log.info(f"[{event_id}] Tag de outro núcleo -> revisão")
+        if not ja_pendente:
+            register_row(phone_digits, client_name, "", "revisao-outro-nucleo", "")
         return get_review_folder("Outro núcleo", client_name, phone_digits)
 
-    # 3. Cliente imobiliário sem vínculo -> revisão (nunca cria pasta)
+    # 3. Cliente imobiliário sem vínculo -> revisão (+ candidata na planilha)
     if CLIENTE_TAG_ID in tag_ids or CLIENTE_TAG_NOME in tag_names:
-        candidata = find_client_candidate(client_name)
-        log.info(f"[{event_id}] Cliente sem vínculo na planilha. Pasta candidata: {candidata}")
+        candidata = find_client_candidate(client_name) or ""
+        log.info(f"[{event_id}] Cliente sem vínculo. Candidata: {candidata or 'nenhuma'}")
+        if not ja_pendente:
+            register_row(phone_digits, client_name, "", "revisao-cliente", candidata)
         return get_review_folder("Cliente sem vínculo", client_name, phone_digits)
 
-    # 4. Lead/novo -> cria pasta e registra vínculo
+    # 4. Lead/novo -> cria pasta, salva e registra vínculo CONFIRMADO
     log.info(f"[{event_id}] Lead/novo -> criando pasta")
     main_folder = create_lead_folder(client_name, phone_digits)
-    register_mapping(phone_digits, client_name, main_folder, "auto-lead")
+    if not ja_pendente:
+        register_row(phone_digits, client_name, main_folder, "auto-lead", "")
     return get_whatsapp_subfolder(main_folder)
 
 
