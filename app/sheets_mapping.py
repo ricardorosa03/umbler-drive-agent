@@ -78,22 +78,60 @@ def lookup_phone(telefone: str) -> dict:
     return {"status": "novo"}
 
 
-def register_row(telefone: str, nome: str, pasta_id: str, origem: str, candidata: str = "") -> bool:
-    """Adiciona uma linha na planilha.
-    Para leads: pasta_id preenchido.
-    Para revisão: pasta_id = "" (vazio), candidata com a dica de pasta."""
+def register_row(telefone: str, nome: str, pasta_id: str, origem: str,
+                 candidata: str = "", id_sugerido: str = "") -> bool:
+    """Adiciona uma linha na planilha (colunas A:G)."""
     try:
         svc = _get_sheets_service()
         agora = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
-        nova_linha = [[_so_digitos(telefone), nome, pasta_id, agora, origem, candidata]]
+        nova_linha = [[_so_digitos(telefone), nome, pasta_id, agora, origem, candidata, id_sugerido]]
         svc.spreadsheets().values().append(
             spreadsheetId=SHEET_ID,
-            range="A:F",
-            valueInputOption="RAW",  # grava como texto puro — não vira número
+            range="A:G",
+            valueInputOption="RAW",
             insertDataOption="INSERT_ROWS",
             body={"values": nova_linha},
         ).execute()
         return True
     except Exception as e:
         print(f"[Sheets] Falha ao registrar linha: {e}")
+        return False
+
+
+def read_all_rows() -> list:
+    """Lê todas as linhas (a partir da 2) com o número da linha.
+    Retorna [{'row': int, 'nome': str, 'pasta_id': str}]."""
+    svc = _get_sheets_service()
+    result = (
+        svc.spreadsheets()
+        .values()
+        .get(spreadsheetId=SHEET_ID, range="A2:G", valueRenderOption="UNFORMATTED_VALUE")
+        .execute()
+    )
+    out = []
+    for idx, linha in enumerate(result.get("values", []), start=2):
+        nome = str(linha[1]).strip() if len(linha) > 1 else ""
+        pasta_id = str(linha[2]).strip() if len(linha) > 2 else ""
+        out.append({"row": idx, "nome": nome, "pasta_id": pasta_id})
+    return out
+
+
+def batch_set_suggestions(updates: list) -> bool:
+    """Grava sugestões em lote. updates = [(row, candidata, id_sugerido), ...].
+    Escreve nas colunas F e G de cada linha."""
+    if not updates:
+        return True
+    try:
+        svc = _get_sheets_service()
+        data = [
+            {"range": f"F{row}:G{row}", "values": [[cand, ids]]}
+            for row, cand, ids in updates
+        ]
+        svc.spreadsheets().values().batchUpdate(
+            spreadsheetId=SHEET_ID,
+            body={"valueInputOption": "RAW", "data": data},
+        ).execute()
+        return True
+    except Exception as e:
+        print(f"[Sheets] Falha no batch de sugestões: {e}")
         return False

@@ -27,10 +27,18 @@ from app.drive_uploader import (
     create_lead_folder,
     get_review_folder,
     get_whatsapp_subfolder,
-    find_client_candidate,
+    match_client_folder,
+    initial_bucket,
+    list_bucket_folders,
+    match_in_folders,
     upload_file,
 )
-from app.sheets_mapping import lookup_phone, register_row
+from app.sheets_mapping import (
+    lookup_phone,
+    register_row,
+    read_all_rows,
+    batch_set_suggestions,
+)
 
 # ─── Config ───────────────────────────────────────────────────────────────────
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -87,6 +95,48 @@ def debug_drives():
         }
     except Exception as e:
         return {"erro": str(e)[:300]}
+
+
+@app.get("/admin/auto-mapear")
+def auto_mapear(request: Request):
+    """Varre a planilha e, para cada linha sem pasta_drive_id, procura a pasta
+    do cliente no Drive e grava a SUGESTÃO (nome em F, ID em G).
+    Você revisa e copia o ID sugerido (G) para pasta_drive_id (C) quando confirmar."""
+    secret = request.query_params.get("secret", "")
+    if WEBHOOK_SECRET and secret != WEBHOOK_SECRET:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    rows = read_all_rows()
+    cache = {}
+    updates = []
+    stats = {"unico": 0, "ambiguo": 0, "nenhum": 0, "pulados": 0}
+
+    for r in rows:
+        if r["pasta_id"]:          # já tem pasta confirmada -> não mexe
+            stats["pulados"] += 1
+            continue
+        if not r["nome"]:          # sem nome -> não tem como casar
+            stats["pulados"] += 1
+            continue
+
+        bucket = initial_bucket(r["nome"])
+        if bucket not in cache:
+            cache[bucket] = list_bucket_folders(bucket)
+        m = match_in_folders(r["nome"], cache[bucket])
+
+        if m["status"] == "unico":
+            updates.append((r["row"], m["nome"], m["id"]))
+            stats["unico"] += 1
+        elif m["status"] == "ambiguo":
+            updates.append((r["row"], f"AMBÍGUO ({m['qtd']})", ""))
+            stats["ambiguo"] += 1
+        else:
+            updates.append((r["row"], "sem match", ""))
+            stats["nenhum"] += 1
+
+    batch_set_suggestions(updates)
+    log.info(f"[auto-mapear] {stats} | linhas atualizadas: {len(updates)}")
+    return {"ok": True, "stats": stats, "linhas_atualizadas": len(updates)}
 
 
 # ─── Webhook ──────────────────────────────────────────────────────────────────
@@ -165,12 +215,18 @@ def resolve_destination(client_name: str, phone: str, tags: list, event_id: str)
             register_row(phone_digits, client_name, "", "revisao-outro-nucleo", "")
         return get_review_folder("Outro núcleo", client_name, phone_digits)
 
-    # 3. Cliente imobiliário sem vínculo -> revisão (+ candidata na planilha)
+    # 3. Cliente imobiliário sem vínculo -> revisão (+ candidata + ID na planilha)
     if CLIENTE_TAG_ID in tag_ids or CLIENTE_TAG_NOME in tag_names:
-        candidata = find_client_candidate(client_name) or ""
-        log.info(f"[{event_id}] Cliente sem vínculo. Candidata: {candidata or 'nenhuma'}")
+        m = match_client_folder(client_name)
+        if m["status"] == "unico":
+            cand, id_sug = m["nome"], m["id"]
+        elif m["status"] == "ambiguo":
+            cand, id_sug = f"AMBÍGUO ({m['qtd']})", ""
+        else:
+            cand, id_sug = "", ""
+        log.info(f"[{event_id}] Cliente sem vínculo. Candidata: {cand or 'nenhuma'}")
         if not ja_pendente:
-            register_row(phone_digits, client_name, "", "revisao-cliente", candidata)
+            register_row(phone_digits, client_name, "", "revisao-cliente", cand, id_sug)
         return get_review_folder("Cliente sem vínculo", client_name, phone_digits)
 
     # 4. Lead/novo -> cria pasta, salva e registra vínculo CONFIRMADO

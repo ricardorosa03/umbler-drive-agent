@@ -183,41 +183,60 @@ def get_review_folder(motivo: str, nome: str, telefone_digits: str) -> str:
     return _find_or_create_folder(nome_pasta, motivo_id)
 
 
-def find_client_candidate(nome: str) -> str | None:
-    """Best-effort: procura no bucket da inicial uma pasta com nome
-    EXATAMENTE igual (normalizado). Usado só para LOG, nunca para rotear.
-    Retorna o nome da pasta candidata, ou None."""
-    try:
-        bucket_id = _find_folder(initial_bucket(nome), ROOT_DRIVE_ID)
-        if not bucket_id:
-            return None
-        svc = _get_service()
-        results = (
+def list_bucket_folders(bucket_name: str) -> list:
+    """Lista todas as pastas (nome + id) dentro de um bucket (ex: 'Aa').
+    Retorna lista de {'name':..., 'id':...}. Pagina até o fim."""
+    bucket_id = _find_folder(bucket_name, ROOT_DRIVE_ID)
+    if not bucket_id:
+        return []
+    svc = _get_service()
+    folders = []
+    page_token = None
+    while True:
+        resp = (
             svc.files()
             .list(
                 q=(
                     f"mimeType='application/vnd.google-apps.folder' "
                     f"and '{bucket_id}' in parents and trashed=false"
                 ),
-                fields="files(id, name)",
+                fields="nextPageToken, files(id, name)",
                 corpora="drive",
                 driveId=ROOT_DRIVE_ID,
                 supportsAllDrives=True,
                 includeItemsFromAllDrives=True,
                 pageSize=1000,
+                pageToken=page_token,
             )
             .execute()
         )
-        alvo = _normalize(nome)
-        matches = [f["name"] for f in results.get("files", []) if _normalize(f["name"]) == alvo]
-        if len(matches) == 1:
-            return matches[0]
-        if len(matches) > 1:
-            return f"MÚLTIPLAS ({len(matches)}): {', '.join(matches)}"
-        return None
+        folders.extend(resp.get("files", []))
+        page_token = resp.get("nextPageToken")
+        if not page_token:
+            break
+    return folders
+
+
+def match_in_folders(nome: str, folders: list) -> dict:
+    """Casa um nome (exato, normalizado) contra uma lista de pastas.
+    Retorna {'status': 'unico'|'ambiguo'|'nenhum', 'nome':.., 'id':.., 'qtd':N}."""
+    alvo = _normalize(nome)
+    matches = [f for f in folders if _normalize(f["name"]) == alvo]
+    if len(matches) == 1:
+        return {"status": "unico", "nome": matches[0]["name"], "id": matches[0]["id"], "qtd": 1}
+    if len(matches) > 1:
+        return {"status": "ambiguo", "nome": "", "id": "", "qtd": len(matches)}
+    return {"status": "nenhum", "nome": "", "id": "", "qtd": 0}
+
+
+def match_client_folder(nome: str) -> dict:
+    """Procura a pasta de um cliente pelo nome no bucket da inicial.
+    Uso pontual (reativo). Para batch, use list_bucket_folders + match_in_folders."""
+    try:
+        return match_in_folders(nome, list_bucket_folders(initial_bucket(nome)))
     except Exception as e:
-        print(f"[Drive] find_client_candidate falhou: {e}")
-        return None
+        print(f"[Drive] match_client_folder falhou: {e}")
+        return {"status": "nenhum", "nome": "", "id": "", "qtd": 0}
 
 
 # ─── Upload ───────────────────────────────────────────────────────────────────
