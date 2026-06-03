@@ -20,6 +20,7 @@ import base64
 import io
 import json
 import os
+import re
 import unicodedata
 
 from google.oauth2 import service_account
@@ -156,9 +157,10 @@ def initial_bucket(nome: str) -> str:
 
 
 def _normalize(texto: str) -> str:
-    """lowercase + sem acento + trim, para comparação de nomes."""
-    t = unicodedata.normalize("NFKD", texto or "").encode("ascii", "ignore").decode()
-    return t.lower().strip()
+    """lowercase + sem acento + sem pontuação + espaços colapsados."""
+    t = unicodedata.normalize("NFKD", texto or "").encode("ascii", "ignore").decode().lower()
+    t = re.sub(r"[^a-z0-9]+", " ", t)
+    return t.strip()
 
 
 # ─── Destinos ─────────────────────────────────────────────────────────────────
@@ -237,6 +239,47 @@ def match_client_folder(nome: str) -> dict:
     except Exception as e:
         print(f"[Drive] match_client_folder falhou: {e}")
         return {"status": "nenhum", "nome": "", "id": "", "qtd": 0}
+
+
+def match_with_candidates(nome: str, folders: list) -> dict:
+    """Match flexível para a coluna de SUGESTÃO (não usado no roteamento ao vivo).
+    1) tenta match exato -> alta confiança (preenche ID).
+    2) se não houver, busca candidatos PARCIAIS (subconjunto de nomes ou
+       primeiro+último nome batendo) -> só mostra, não preenche ID.
+    Retorna:
+      {'status':'exato','nome':..,'id':..}
+      {'status':'ambiguo_exato','qtd':N}
+      {'status':'parcial','partials':[{'name':..,'id':..}, ...]}
+      {'status':'nenhum'}
+    """
+    alvo = _normalize(nome)
+    if not alvo:
+        return {"status": "nenhum"}
+    alvo_tokens = alvo.split()
+
+    exatos = [f for f in folders if _normalize(f["name"]) == alvo]
+    if len(exatos) == 1:
+        return {"status": "exato", "nome": exatos[0]["name"], "id": exatos[0]["id"]}
+    if len(exatos) > 1:
+        return {"status": "ambiguo_exato", "qtd": len(exatos)}
+
+    # Sem exato: busca candidatos parciais
+    set_a = set(alvo_tokens)
+    partials = []
+    for f in folders:
+        ftoks = _normalize(f["name"]).split()
+        if not ftoks:
+            continue
+        set_f = set(ftoks)
+        subset = set_a <= set_f or set_f <= set_a            # um nome contém o outro
+        first_last = (alvo_tokens[0] == ftoks[0] and alvo_tokens[-1] == ftoks[-1])
+        first_plus = (alvo_tokens[0] == ftoks[0] and len(set_a & set_f) >= 2)
+        if subset or first_last or first_plus:
+            partials.append({"name": f["name"], "id": f["id"]})
+
+    if partials:
+        return {"status": "parcial", "partials": partials[:4]}
+    return {"status": "nenhum"}
 
 
 # ─── Upload ───────────────────────────────────────────────────────────────────

@@ -31,6 +31,7 @@ from app.drive_uploader import (
     initial_bucket,
     list_bucket_folders,
     match_in_folders,
+    match_with_candidates,
     upload_file,
 )
 from app.sheets_mapping import (
@@ -109,7 +110,7 @@ def auto_mapear(request: Request):
     rows = read_all_rows()
     cache = {}
     updates = []
-    stats = {"unico": 0, "ambiguo": 0, "nenhum": 0, "pulados": 0}
+    stats = {"exato": 0, "parcial": 0, "ambiguo": 0, "nenhum": 0, "pulados": 0}
 
     for r in rows:
         if r["pasta_id"]:          # já tem pasta confirmada -> não mexe
@@ -122,14 +123,18 @@ def auto_mapear(request: Request):
         bucket = initial_bucket(r["nome"])
         if bucket not in cache:
             cache[bucket] = list_bucket_folders(bucket)
-        m = match_in_folders(r["nome"], cache[bucket])
+        res = match_with_candidates(r["nome"], cache[bucket])
 
-        if m["status"] == "unico":
-            updates.append((r["row"], m["nome"], m["id"]))
-            stats["unico"] += 1
-        elif m["status"] == "ambiguo":
-            updates.append((r["row"], f"AMBÍGUO ({m['qtd']})", ""))
+        if res["status"] == "exato":
+            updates.append((r["row"], res["nome"], res["id"]))
+            stats["exato"] += 1
+        elif res["status"] == "ambiguo_exato":
+            updates.append((r["row"], f"AMBÍGUO ({res['qtd']})", ""))
             stats["ambiguo"] += 1
+        elif res["status"] == "parcial":
+            texto = "? " + " | ".join(f"{c['name']} [{c['id']}]" for c in res["partials"])
+            updates.append((r["row"], texto[:500], ""))
+            stats["parcial"] += 1
         else:
             updates.append((r["row"], "sem match", ""))
             stats["nenhum"] += 1
