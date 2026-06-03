@@ -34,6 +34,17 @@ def _so_digitos(telefone: str) -> str:
     return "".join(c for c in (telefone or "") if c.isdigit())
 
 
+def _celula_para_telefone(valor) -> str:
+    """Converte uma célula (texto OU número) em telefone só-dígitos.
+    Lida com o caso de gravações antigas que viraram número."""
+    if isinstance(valor, float):
+        # número grande pode vir como float; remove o .0
+        valor = format(int(valor), "d")
+    elif isinstance(valor, int):
+        valor = str(valor)
+    return _so_digitos(str(valor))
+
+
 def lookup_phone(telefone: str) -> dict:
     """Procura o telefone na planilha.
     Retorna:
@@ -49,14 +60,18 @@ def lookup_phone(telefone: str) -> dict:
     result = (
         svc.spreadsheets()
         .values()
-        .get(spreadsheetId=SHEET_ID, range=RANGE_LEITURA)
+        .get(
+            spreadsheetId=SHEET_ID,
+            range=RANGE_LEITURA,
+            valueRenderOption="UNFORMATTED_VALUE",  # evita notação científica
+        )
         .execute()
     )
     for linha in result.get("values", []):
         if not linha:
             continue
-        if _so_digitos(linha[0]) == alvo:
-            pasta_id = linha[2].strip() if len(linha) >= 3 else ""
+        if _celula_para_telefone(linha[0]) == alvo:
+            pasta_id = str(linha[2]).strip() if len(linha) >= 3 else ""
             if pasta_id:
                 return {"status": "confirmado", "pasta_id": pasta_id}
             return {"status": "pendente"}
@@ -74,7 +89,7 @@ def register_row(telefone: str, nome: str, pasta_id: str, origem: str, candidata
         svc.spreadsheets().values().append(
             spreadsheetId=SHEET_ID,
             range="A:F",
-            valueInputOption="USER_ENTERED",
+            valueInputOption="RAW",  # grava como texto puro — não vira número
             insertDataOption="INSERT_ROWS",
             body={"values": nova_linha},
         ).execute()
